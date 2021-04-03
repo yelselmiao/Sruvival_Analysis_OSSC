@@ -1,0 +1,550 @@
+---
+title: "Survival_Analysis_of_OSSC"
+output:
+  html_notebook: default
+  md_document: default
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r Load Library}
+library(ggplot2)
+library(dplyr)
+library(survival)
+library(tidyverse)
+library(pacman)
+library(colorspace)
+library(knitr)
+library(survminer)
+library(KMsurv)
+library(flexsurv)
+library(gridExtra)
+library(Epi)
+library(mice)
+```
+
+
+```{r dataset}
+df <- read.table('http://www.stats4life.se/data/oralca.txt',header = TRUE)
+
+df <- df %>% mutate(id = as.factor(id),
+                        sex = as.factor(sex),
+                        event = as.factor(event),
+                        stage = as.factor(stage))
+
+summary(df)
+```
+
+## Descriptive Data
+```{r Gender Dist}
+# Gender
+df %>% group_by(sex) %>% 
+  tally()
+```
+
+```{r Age}
+df %>% group_by(id) %>% 
+  #summarize(min_age = min(age)) %>%
+  ggplot(aes(x=age)) + 
+  geom_histogram(bins = 30) + 
+  ggtitle("Patients' Ages at Diagnosis") + 
+  labs(x = "Age (in years)", y = "Freq")
+ 
+
+df %>% #group_by(id) %>% 
+  summarize(min_age = min(age)) %>%
+ filter(min_age > 40) %>%
+  count() 
+```
+
+
+
+## Check missing value
+
+```{r check missing stage}
+df_2 <- df_1 %>% mutate(stage_missing = ifelse(stage == 'unkn', 'Stage Missing','Stage Not Missing'),
+                        ) %>%
+  mutate(stage_missing = as.factor(stage_missing))
+
+fit_3 <- survfit(Surv(time, death) ~ stage_missing, data = df_2)
+
+ggsurvplot(fit_3,data = df_2, risk.table = FALSE, xlab = "Survival Time (in years)", censor = T,conf.int = FALSE)
+```
+
+
+```{r stage missing and age}
+df_3 <- df_2 %>% mutate(age_group = case_when(age <= 20 ~ '0-20',
+                                      age > 20 & age <= 40 ~ '20 ~ 40',
+                                      age > 40 & age <= 60 ~ '40 ~ 60',
+                                      age > 60 & age <= 80 ~ '60 ~ 80',
+                                      age > 80 ~ '80+'))
+
+
+df_3 %>% mutate(age_group = as.factor(age_group)) %>% 
+  group_by(age_group,stage_missing) %>% 
+  tally()
+
+chisq.test(df_3$stage_missing,df_3$age_group)  
+
+chisq.test(df_3$stage_missing,df_3$age_group)  
+fisher.test(df_3$stage_missing,df_3$age_group)
+
+#29.4%
+# 25.6%
+# 25.8%
+# 31.4%
+
+```
+
+```{r missing stage and gender}
+df_2 %>% 
+  group_by(sex,stage_missing) %>% 
+  tally()
+
+chisq.test(df_2$stage_missing,df_3$sex)  
+fisher.test(df_2$stage_missing,df_3$sex)
+
+# 21.6%
+# 31.2%
+```
+
+
+
+```{r data imputation}
+# replace 'unkn' to NA
+df <- df %>% mutate(stage = ifelse(stage == 'unkn', NA, stage))
+df$stage <- as.factor(df$stage)
+
+df_imp <- mice(df,m=5,maxit=50,meth='pmm',seed=500)
+
+df_imputed <- complete(df_imp,1)
+
+# Remove the age outlier
+df_imputed <- df_imputed %>% filter(age!= 15.15168)
+
+
+df_imputed <- df_imputed %>% mutate(age_group = case_when(
+                                       age > 20 & age <= 40 ~ '20 ~ 40',
+                                       age > 40 & age <= 60 ~ '40 ~ 60',
+                                       age > 60 & age <= 80 ~ '60 ~ 80',
+                                       age > 80 ~ '80+'),
+                                    age_group = as.factor(age_group),
+                                    death = ifelse(event!='Alive',TRUE,FALSE),
+                                    death = as.factor(death))
+```
+
+
+## EDA
+
+```{r Dist of Status}
+
+df_event <- as.data.frame(table(df$event))
+colnames(df_event)[1] <- "Status"
+df_event$lab <- 100 * df_event$Freq / sum(df_event$Freq)
+df_event$percent <- paste0(round(df_event$lab), '%')
+df_event$lab <- paste0(df_event$Freq," (", df_event$percent,')')
+
+
+
+df %>% 
+  ggplot(aes(event)) + 
+  geom_bar() + 
+  geom_bar(aes(fill = sex)) + 
+  geom_text(data=df_event,aes(x=Status,y=Freq,label=lab,vjust = -0.3)) + 
+  labs(x = "Status") + 
+  ggtitle("Distribution of Patients' Life Status at Survival Time") + 
+  scale_fill_brewer(palette="Accent")
+  
+```
+
+```{r Dist of Status 2}
+
+df_gender <- as.data.frame(table(df$sex))
+colnames(df_gender)[1] <- "Gender"
+df_gender$lab <- 100 * df_gender$Freq / sum(df_gender$Freq)
+df_gender$percent <- paste0(round(df_gender$lab), '%')
+df_gender$lab <- paste0(df_gender$Freq," (", df_gender$percent,')')
+
+
+
+df %>% 
+  ggplot(aes(sex)) + 
+  geom_bar() + 
+  geom_bar(aes(fill = event)) + 
+  geom_text(data=df_gender,aes(x=Gender,y=Freq,label=lab,vjust = -0.3)) + 
+  labs(x = "Status") + 
+  ggtitle("Distribution of Patients' Life Status at Survival Time") + 
+  scale_fill_brewer(palette="Accent")
+  
+```
+
+
+```{r Dist of Status 3}
+
+df_gender_stutus <- df_imputed %>%
+ select(sex, event) %>%
+  group_by(sex,event) %>%
+  tally() 
+
+
+df_gender_stutus <-  plyr::ddply(df_gender_stutus, .(sex), transform, percent = n/sum(n) * 100)
+
+# Format the labels and calculate their positions
+df_gender_stutus = ddply(df_gender_stutus, .(sex), transform, pos = (cumsum(n) - 0.5 * n))
+df_gender_stutus$label = paste0(sprintf("%.0f", df_gender_stutus$percent), "%")
+
+df_gender_stutus <- df_gender_stutus %>% 
+  dplyr::select(
+event, sex, n, percent, pos, label)
+
+
+df_imputed$sex <- factor(df_imputed$sex)
+
+df_gender_stutus %>% 
+  dplyr:: rename('Status' = 'event') %>%
+  ggplot(aes(x = sex, y = n, fill = Status)) + 
+  #geom_bar() + 
+  #geom_bar(aes(fill = event)) + 
+  geom_col() + 
+  #geom_text(data=df_stage,aes(x=Stage,y=Freq,label=lab, vjust = - 0.8)) + 
+  geom_text(data =df_gender_stutus %>% dplyr:: rename('Status' = 'event') , aes(label = label, y=n), position = position_stack(vjust = 0.5)) + 
+  labs(x = "Gender") + 
+  ggtitle("Distribution of Patients' Gender vs. Status") + 
+  scale_fill_brewer(palette="Accent")
+
+```
+
+
+
+
+
+```{r Dist of Stage}
+
+df_stage_stutus <- df_imputed %>%
+  #mutate(death = event != "Alive") %>%
+ select(stage, event) %>%
+  group_by(stage,event) %>%
+  tally() 
+
+
+df_stage_stutus <-  plyr::ddply(df_stage_stutus, .(stage), transform, percent = n/sum(n) * 100)
+
+# Format the labels and calculate their positions
+df_stage_stutus = ddply(df_stage_stutus, .(stage), transform, pos = (cumsum(n) - 0.5 * n))
+df_stage_stutus$label = paste0(sprintf("%.0f", df_stage_stutus$percent), "%")
+
+df_stage_stutus <- df_stage_stutus %>% 
+  dplyr::select(
+event, stage, n, percent, pos, label)
+
+
+
+df_stage <- as.data.frame(table(df_imputed$stage))
+colnames(df_stage)[1] <- "Stage"
+df_stage$lab <- 100 * df_stage$Freq / sum(df_stage$Freq)
+df_stage$percent <- paste0(round(df_stage$lab), '%')
+df_stage$lab <- paste0(df_stage$Freq," (", df_stage$percent,')')
+
+df_imputed$stage <- factor(df_imputed$stage)
+
+df_stage_stutus %>% 
+  #mutate(death = ifelse(event != "Alive","Dead", "Alive")) %>%
+  #mutate(stage = as.factor(stage)) %>% 
+  #dplyr::rename('Status' = 'death') %>% 
+  #ggplot(aes(stage)) + 
+  dplyr:: rename('Status' = 'event') %>%
+  ggplot(aes(x = stage, y = n, fill = Status)) + 
+  #geom_bar() + 
+  #geom_bar(aes(fill = event)) + 
+  geom_col() + 
+  #geom_text(data=df_stage,aes(x=Stage,y=Freq,label=lab, vjust = - 0.8)) + 
+  geom_text(data =df_stage_stutus %>% dplyr:: rename('Status' = 'event') , aes(label = label, y=n), position = position_stack(vjust = 0.5)) + 
+  labs(x = "Stage") + 
+  ggtitle("Distribution of Patients' TNM Staging vs. Status") + 
+  scale_fill_brewer(palette="Accent")
+
+```
+
+
+
+```{r status vs. Survival time, fig.height=3, fig.width=8}
+df_imputed %>% 
+  group_by(id) %>% 
+  #summarize(year = max(time)) %>%
+  #right_join(df, by = 'id') %>% 
+  #rename('Status' = 'event') %>%
+  ggplot(aes(x = id)) +
+  geom_bar(aes(y = time), stat = 'identity') + 
+  geom_point(aes(y = time, color = death), size = 3) + 
+  scale_x_discrete(labels = NULL, breaks = NULL) + 
+  coord_flip() + 
+  ggtitle("Patient's Status at Survival Time") + 
+  labs(x = "Subject ID", y = "Survival Time (in years)")
+  theme(plot.title = element_text(size=40),
+        axis.text.x = element_text(color = "grey20", size = 12),
+        axis.text.y = element_text(color = "grey20", size = 20),  
+        axis.title.x = element_text(color = "grey20", size = 12),
+        axis.title.y = element_text(color = "grey20", size = 20)) 
+  
+```
+
+
+
+## Kaplan-Meier
+```{r Kaplan-Meier on all, fig.height=3}
+
+km_fit_all <- survfit(Surv(time, death) ~ 1, data = df_imputed)
+quantile(km_fit_all) 
+ggsurvplot(km_fit_all,data = df_imputed, risk.table = TRUE, xlab = "Sruvival Time (years)", censor = T)
+
+```
+
+```{r KM on Age}
+df_3 <- df_3 %>%  mutate(age_group = as.factor(age_group))
+fit_1_KM <- survfit(Surv(time, death) ~ age_group, data = df_3)
+ggsurvplot(fit_1_KM,data = df_3, risk.table = FALSE, xlab = "Survival Time (years)", censor = T,conf.int = TRUE)
+
+```
+
+
+
+
+
+```{r KM on Gender, fig.height=3}
+#df_1$event <- factor(df_1$event)
+
+# fit KM to gender
+fit_2_KM <- survfit(Surv(time, death) ~ sex, data = df_1)
+
+# fit NA to gender
+fit_2_NA <- survfit(Surv(time, death) ~ sex, type = data = df_1, type = "fleming-harrington")
+
+# Check the quantile
+#quantile(fit_2_KM)
+
+
+# KM plot
+ggsurvplot(fit_2_KM,data = df_1, risk.table = FALSE, xlab = "Sruvival Time (years)", censor = T,conf.int = TRUE)
+
+# CH plot
+ggsurvplot(fit_2_KM,data = df_1, risk.table = FALSE, xlab = "Survival Time (years)", censor = T,conf.int = TRUE,fun = "cumhaz")
+```
+
+```{r log rank: gender}
+surv_diff_gender <- survdiff(Surv(time, death) ~ sex, data = df_1)
+surv_diff_gender
+```
+
+
+```{r imputed stage}
+
+df_imputed <- df_imputed %>% 
+  mutate(death = 'event' != 'Alive')
+
+fit_3 <- survfit(Surv(time, death) ~ stage, data = df_imputed)
+
+
+#summary of the model
+fit_3
+
+# Check the quantile
+quantile(fit_3)
+
+# Survival fit plot
+ggsurvplot(fit_3,data = df_imputed, risk.table = FALSE, xlab = "Survival Time (years)", censor = T,conf.int = TRUE)
+
+ggsurvplot(fit_3,data = df_imputed, risk.table = FALSE, xlab = "Survival Time (years)", censor = T,fun = "cumhaz",conf.int = TRUE)
+
+```
+
+```{r log rank on Stage}
+df_imputed_new <-  df_imputed %>% mutate(stage_new = ifelse(stage == '1' | stage == '2', '1_2',stage))
+df_imputed_new$stage_new <- factor(df_imputed_new$stage_new)
+
+fit_3_new <- survfit(Surv(time, death) ~ stage_new, data = df_imputed_new)
+
+# Survival fit plot
+ggsurvplot(fit_3_new,data = df_imputed_new, risk.table = FALSE, xlab = "Survival Time (years)", censor = T,conf.int = TRUE)
+
+ggsurvplot(fit_3_new,data = df_imputed_new, risk.table = FALSE, xlab = "Survival Time (years)", censor = T,conf.int = TRUE,fun = "cumhaz")
+
+
+surv_diff_stage <- survdiff(Surv(time, death) ~ stage_new, data = df_imputed_new)
+surv_diff_stage
+```
+
+
+```{r KM on Age with outlier removed}
+
+fit_4 <- survfit(Surv(time, death) ~ age_group, data = df_imputed)
+
+
+#summary of the model
+fit_4
+
+# Check the quantile
+quantile(fit_4)
+
+# Survival fit plot
+ggsurvplot(fit_4,data = df_imputed, risk.table = FALSE, xlab = "Survival Time (years)", censor = T,conf.int = TRUE)
+ggsurvplot(fit_4,data = df_imputed, risk.table = FALSE, xlab = "Survival Time (years)", censor = T,conf.int = TRUE,fun = "cumhaz")
+
+```
+
+```{r log rank over age}
+surv_diff_stage <- survdiff(Surv(time, death) ~ age_group, data = df_imputed)
+surv_diff_stage
+```
+
+
+
+## Parametric Modelling
+
+
+```{r Cox Ph Model}
+
+df_imputed <- df_imputed %>% filter(id != '32')
+df_imputed$age_group <- factor(df_imputed$age_group)
+
+cox_ph <- coxph(Surv(time,death) ~ age_group + stage_new, data = df_imputed_new)
+summary(cox_ph)
+```
+
+```{r Forest Plot}
+ggforest(cox_ph, data = df_imputed_new)
+```
+```{r single term deletion}
+drop1(cox_ph)
+```
+
+
+```{r Schoenfeld,fig.height=3}
+cox.zph.m1  <- cox.zph(cox_ph)
+#cox.zph.m1
+ggcoxzph(cox.zph.m1)
+```
+```{r Deviance Residual}
+ggcoxdiagnostics(cox_ph, type = "deviance",
+                 linear.predictions = FALSE, ggtheme = theme_bw())
+```
+
+
+```{r Predict Plot}
+
+# Generate new data
+new_age <- c('20 ~ 40','40 ~ 60',"60 ~ 80", '80+','20 ~ 40','40 ~ 60',"60 ~ 80", '80+','20 ~ 40','40 ~ 60',"60 ~ 80", '80+') 
+new_stage <- c('1_2', '1_2','1_2','1_2', '3','3','3', '3','4','4', '4', '4') 
+newdata <- data.frame(age_group=new_age, stage_new=new_stage)
+
+
+
+newdata$age_group <- as.factor(newdata$age_group)
+newdata$stage <- as.factor(newdata$stage)
+
+
+newdata$id <- 1:12
+
+
+
+surv_summary(survfit(cox_ph, newdata = newdata)) %>%
+  merge(newdata, by.x = "strata", by.y = "id") %>%
+  ggplot(aes(x = time, y = surv, col = age_group)) +
+  geom_step() + facet_grid(. ~ stage_new) +
+  labs(x = "Time (years)", y = "Survival probability") + theme_classic()
+
+
+
+```
+
+```{r}
+
+# Using the Cox model to make predictions
+risk <- function(model, newdata, time) {
+        as.numeric(1-summary(survfit(model, newdata = newdata, se.fit = F, conf.int = F), times = time)$surv)
+}
+
+# Predicted risk of death after 365 days (one year)
+newdata
+
+
+plot(survfit(cox_ph, newdata=newdata), col=c(1:16), main="Fig.3 - Predicted Survival Rates", 
+     xlab="Time in Days", ylab="Estimated Survival Probability", lty=c(1:16), conf.int=F) 
+legend("topright", lty=c(1:16), col=c(1:16), 
+       c("20~ 40: stage 1", 
+         "40 ~ 60: stage 2", 
+         "60 ~ 80: stage 3", 
+         "80+: stage 4", 
+         "20~ 40: stage 1", 
+         "40 ~ 60: stage 2", 
+         "60 ~ 80: stage 3", 
+         "80+: stage 4", 
+         "20~ 40: stage 1", 
+         "40 ~ 60: stage 2", 
+         "60 ~ 80: stage 3", 
+         "80+: stage 4", 
+         "20~ 40: stage 1", 
+         "40 ~ 60: stage 2", 
+         "60 ~ 80: stage 3", 
+         "80+: stage 4"
+         )) 
+
+```
+
+
+```{r Risk Calcualtion}
+risk_1_vec <- risk(cox_ph, newdata, 1)
+risk_2_vec <- risk(cox_ph, newdata, 2)
+
+newdata$risk_1 <- NA
+newdata$risk_2 <- NA
+for (i in 1:nrow(newdata)){
+  newdata$risk_1[i] <-  risk_1_vec[i]
+  newdata$risk_2[i] <-  risk_2_vec[i]
+}
+ 
+newdata <- newdata %>% mutate(stage_new = as.factor(stage_new)) 
+newdata %>%
+  dplyr::group_by(stage_new) %>% 
+  dplyr::summarize (mean_1 = mean(risk_1), mean_2 = mean(risk_2), sd_1 = sd(risk_1), sd_2 =sd(risk_2) )  
+
+newdata %>%
+  dplyr::group_by(age_group) %>% 
+  dplyr::summarize (mean_1 = mean(risk_1), mean_2 = mean(risk_2), sd_1 = sd(risk_1), sd_2 =sd(risk_2) )
+```
+
+
+
+
+```{r Cox-Snell}
+csresids <- df_imputed$death-residuals(cox_ph,"martingale")
+
+fitres <- survfit(coxph(Surv(csresids, df_imputed_new$death)~1, method='breslow'), type='kaplan-meier')
+plot(fitres$time,-log(fitres$surv),type='p', #main="Cox-Snell Residuals Plot", 
+     xlab='Cox-Snell Residuals', ylab='Estimated Cumulative Hazard Function')
+abline(0,1,col='red')
+```
+
+
+
+
+```{r AFT model}
+AFT <- flexsurvreg(Surv(time, death) ~ sex + age_group + stage_new, data = df_imputed_new, dist = "weibull")
+AFT
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
